@@ -85,6 +85,30 @@ fn test_codepoint() {
 }
 
 #[test]
+fn test_surrogate_pair() {
+	assert_eq!(
+		"\"..\\uD834\\uDD1E..\"".parse::<JsonValue>(),
+		Ok(JsonValue::String("..𝄞..".into()))
+	)
+}
+
+#[test]
+fn test_bad_surrogate() {
+	assert_eq!(
+		"\"..\\uD834..\"".parse::<JsonValue>(),
+		Ok(JsonValue::String("..�..".into()))
+	)
+}
+
+#[test]
+fn test_bad_reversed_surrogate() {
+	assert_eq!(
+		"\"..\\uDD1E\\uD834..\"".parse::<JsonValue>(),
+		Ok(JsonValue::String("..��..".into()))
+	)
+}
+
+#[test]
 fn test_bad_escape_seq() {
 	assert!("\"\\a\"".parse::<JsonValue>().is_err());
 }
@@ -268,6 +292,11 @@ fn test_nested_empty_structures() {
 			)
 		])))
 	);
+}
+
+#[test]
+fn test_error_just_minus() {
+	assert!("-".parse::<JsonValue>().is_err());
 }
 
 #[test]

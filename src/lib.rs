@@ -34,7 +34,7 @@ macro_rules! json {
 	};
 	($e:expr) => {
 		JsonValue::from($e)
-	};
+	}
 }
 
 impl Drop for JsonValue {
@@ -103,15 +103,13 @@ impl TryFrom<f64> for FiniteF64 {
 }
 
 macro_rules! impl_from {
-	($($from:ty => $into:ty: $in:ident => $out:expr),*) => {
-		$(
-			impl<'a> From<$from> for $into {
-				fn from(value: $from) -> Self {
-					(|$in: $from| $out)(value)
-				}
+	($($from:ty => $into:ty: $in:ident => $out:expr),*) => { $(
+		impl<'a> From<$from> for $into {
+			fn from(value: $from) -> Self {
+				(|$in: $from| $out)(value)
 			}
-		)*
-	};
+		}
+	)* }
 }
 
 impl_from!(
@@ -130,39 +128,35 @@ impl_from!(
 );
 
 macro_rules! impl_try_from {
-	($($kind:ident: $type:ty),*) => {
-		$(
-			impl TryFrom<JsonValue> for $type {
-				type Error = &'static str;
+	($($kind:ident: $type:ty),*) => { $(
+		impl TryFrom<JsonValue> for $type {
+			type Error = &'static str;
 
-				fn try_from(mut value: JsonValue) -> Result<Self, Self::Error> {
-					match &mut value {
-						JsonValue::$kind(val) => Ok(take(val)),
-						_ => Err(concat!("provided value is not a JSON ", stringify!($kind))),
-					}
+			fn try_from(mut value: JsonValue) -> Result<Self, Self::Error> {
+				match &mut value {
+					JsonValue::$kind(val) => Ok(take(val)),
+					_ => Err(concat!("provided value is not a JSON ", stringify!($kind))),
 				}
 			}
-		)*
-	};
+		}
+	)* }
 }
 
 impl_try_from!(Boolean: bool, String: String, List: Vec<JsonValue>, Object: HashMap<String, JsonValue>);
 
 macro_rules! impl_try_from_ref {
-	($($in:ty: $kind:ident => $out:ty),*) => {
-		$(
-			impl<'a> TryFrom<$in> for $out {
-				type Error = &'static str;
+	($($in:ty: $kind:ident => $out:ty),*) => { $(
+		impl<'a> TryFrom<$in> for $out {
+			type Error = &'static str;
 
-				fn try_from(value: $in) -> Result<Self, Self::Error> {
-					match value {
-						JsonValue::$kind(val) => Ok(val.into()),
-						_ => Err(concat!("provided value is not a JSON ", stringify!($kind))),
-					}
+			fn try_from(value: $in) -> Result<Self, Self::Error> {
+				match value {
+					JsonValue::$kind(val) => Ok(val.into()),
+					_ => Err(concat!("provided value is not a JSON ", stringify!($kind))),
 				}
 			}
-		)*
-	};
+		}
+	)* }
 }
 
 impl_try_from_ref!(
@@ -422,11 +416,24 @@ impl FromStr for JsonValue {
 							(b'\\', Some(b'r')) => '\r',
 							(b'\\', Some(b't')) => '\t',
 							(b'\\', Some(b'u')) => {
-								let codepoint = input
+								let mut codepoint = input
 									.get(i + 2..i + 6)
 									.and_then(|s| u32::from_str_radix(s, 16).ok())
 									.ok_or("invalid hex string")?;
 								i += 4;
+
+								let is_surrogate = matches!(codepoint, 0xd800..0xdc00);
+								if is_surrogate && matches!(bytes.get(i + 2..i + 4), Some(b"\\u")) {
+									codepoint = input
+										.get(i + 4..i + 8)
+										.and_then(|s| u32::from_str_radix(s, 16).ok())
+										.ok_or("invalid hex string")?
+										.checked_sub(0xdc00)
+										.filter(|&num| num < 0xe000 - 0xdc00)
+										.map(|num| 0x10000 + num + (codepoint - 0xd800) * 1024)
+										.inspect(|_| i += 6)
+										.unwrap_or(codepoint);
+								}
 								char::from_u32(codepoint).unwrap_or('�')
 							}
 							(b'\\', Some(c)) => Err(format!("invalid escape sequence: {c}"))?,
@@ -459,13 +466,12 @@ impl FromStr for JsonValue {
 					if is_negative {
 						i += 1;
 					}
-					if bytes[i] == b'0' && matches!(bytes.get(i + 1), Some(b'0'..=b'9')) {
-						Err("illegal leading zero")?
-					}
 
-					let mut num = match bytes.get(i).ok_or("unexpected end of input")? {
-						c @ b'0'..=b'9' => (c - b'0') as f64,
-						c => Err(format!("unexpected character: {}", *c as char))?,
+					let mut num = match (bytes.get(i), bytes.get(i + 1)) {
+						(Some(b'0'), Some(b'0'..=b'9')) => Err("illegal leading zero")?,
+						(Some(c @ b'0'..=b'9'), _) => (c - b'0') as f64,
+						(Some(c), _) => Err(format!("unexpected character: {}", *c as char))?,
+						(None, _) => Err("unexpected end of input")?,
 					};
 
 					loop {
