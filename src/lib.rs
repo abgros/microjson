@@ -1,6 +1,7 @@
 pub use std::collections::HashMap;
 use std::fmt::{self, Debug, Display, Formatter, Write};
-use std::mem::take;
+use std::iter::repeat_with;
+use std::mem::{forget, replace, take};
 use std::ops::{Index, IndexMut};
 use std::str::FromStr;
 
@@ -39,16 +40,15 @@ macro_rules! json {
 
 impl Drop for JsonValue {
 	fn drop(&mut self) {
-		let mut stack = match self {
-			JsonValue::List(lst) => take(lst),
-			JsonValue::Object(obj) => take(obj).into_values().collect(),
-			_ => return,
-		};
-		while let Some(mut last) = stack.pop() {
-			match &mut last {
-				JsonValue::List(lst) => stack.append(lst),
-				JsonValue::Object(obj) => stack.extend(take(obj).into_values()),
-				_ => {}
+		if matches!(self, JsonValue::List(_) | JsonValue::Object(_)) {
+			let mut stack = vec![replace(self, JsonValue::Null)];
+			while let Some(mut last) = stack.pop() {
+				match &mut last {
+					JsonValue::List(lst) => stack.extend(take(lst)),
+					JsonValue::Object(obj) => stack.extend(take(obj).into_values()),
+					_ => continue,
+				};
+				forget(last);
 			}
 		}
 	}
@@ -85,6 +85,9 @@ impl PartialEq for JsonValue {
 	}
 }
 
+impl Eq for FiniteF64 {}
+impl Eq for JsonValue {}
+
 impl Clone for JsonValue {
 	fn clone(&self) -> Self {
 		self.to_string().parse().unwrap()
@@ -114,7 +117,7 @@ macro_rules! impl_from {
 
 impl_from!(
 	bool => JsonValue: val => JsonValue::Boolean(val),
-	f64 => JsonValue: val => FiniteF64::try_from(val).map(JsonValue::from).unwrap_or(JsonValue::Null),
+	f64 => JsonValue: val => FiniteF64::try_from(val).map_or(JsonValue::Null, JsonValue::from),
 	u32 => JsonValue: val => FiniteF64::try_from(val as f64).map(JsonValue::from).unwrap(),
 	i32 => JsonValue: val => FiniteF64::try_from(val as f64).map(JsonValue::from).unwrap(),
 	FiniteF64 => JsonValue: val => JsonValue::Number(val),
@@ -181,8 +184,7 @@ impl Index<usize> for JsonValue {
 	type Output = JsonValue;
 
 	fn index(&self, idx: usize) -> &Self::Output {
-		let inner: &Vec<JsonValue> = self.try_into().unwrap();
-		&inner[idx]
+		&(<&Vec<_>>::try_from(self).unwrap())[idx]
 	}
 }
 
@@ -190,21 +192,19 @@ impl Index<&str> for JsonValue {
 	type Output = JsonValue;
 
 	fn index(&self, key: &str) -> &Self::Output {
-		let inner: &HashMap<String, JsonValue> = self.try_into().unwrap();
-		&inner[key]
+		&(<&HashMap<_, _>>::try_from(self).unwrap())[key]
 	}
 }
 
 impl IndexMut<usize> for JsonValue {
-	fn index_mut(&mut self, key: usize) -> &mut Self::Output {
-		let inner: &mut Vec<JsonValue> = self.try_into().unwrap();
-		&mut inner[key]
+	fn index_mut(&mut self, idx: usize) -> &mut Self::Output {
+		&mut (<&mut Vec<_>>::try_from(self).unwrap())[idx]
 	}
 }
 
 impl IndexMut<&str> for JsonValue {
 	fn index_mut(&mut self, key: &str) -> &mut Self::Output {
-		let inner: &mut HashMap<String, JsonValue> = self.try_into().unwrap();
+		let inner: &mut HashMap<_, _> = self.try_into().unwrap();
 		inner.entry(key.into()).or_insert(JsonValue::Null)
 	}
 }
@@ -225,18 +225,15 @@ impl JsonValue {
 				c => f.write_char(c)?,
 			}
 		}
-		f.write_char('"')?;
-		Ok(())
+		f.write_char('"')
 	}
 
 	fn maybe_newline(f: &mut Formatter, flag: bool, depth: usize) -> Result<(), fmt::Error> {
-		if flag {
-			f.write_char('\n')?;
-			for _ in 0..depth {
-				f.write_char('\t')?;
-			}
+		if !flag {
+			return Ok(());
 		}
-		Ok(())
+		f.write_char('\n')?;
+		repeat_with(|| f.write_char('\t')).take(depth).collect()
 	}
 
 	fn serialize(&self, f: &mut Formatter, pretty: bool) -> Result<(), fmt::Error> {
@@ -456,16 +453,14 @@ impl FromStr for JsonValue {
 						key_stack.push(s);
 						expect = Value;
 						continue;
-					} else {
-						JsonValue::from(s)
 					}
+
+					JsonValue::from(s)
 				}
 				(b'-' | b'0'..=b'9', Value | ValueOrBracket) => {
 					let mut decimal_places = 0;
 					let is_negative = bytes[i] == b'-';
-					if is_negative {
-						i += 1;
-					}
+					i += if is_negative { 1 } else { 0 };
 
 					let mut num = match (bytes.get(i), bytes.get(i + 1)) {
 						(Some(b'0'), Some(b'0'..=b'9')) => Err("illegal leading zero")?,
